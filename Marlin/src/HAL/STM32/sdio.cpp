@@ -386,6 +386,10 @@ void HAL_SD_MspInit(SD_HandleTypeDef *hsd) {
 
 #endif // !SDIO_FOR_STM32H7
 
+#ifndef SDIO_FOR_STM32H7
+  alignas(4) static uint8_t sdio_bounce_buf[512]; // Word-aligned copy for unaligned callers
+#endif
+
 /**
  * @brief Read a block
  * @details Read a block from media with SDIO
@@ -415,8 +419,15 @@ bool SDIO_ReadBlock(uint32_t block, uint8_t *dst) {
 
   #else
 
+    // The SDIO DMA moves 32-bit words, so the memory address must be word-aligned.
+    // Bounce unaligned buffers through an aligned one instead of corrupting data.
+    const bool unaligned = (uintptr_t(dst) & 3U) != 0;
+    uint8_t * const buf = unaligned ? sdio_bounce_buf : dst;
     uint8_t retries = SDIO_READ_RETRIES;
-    while (retries--) if (SDIO_ReadWriteBlock_DMA(block, nullptr, dst)) return true;
+    while (retries--) if (SDIO_ReadWriteBlock_DMA(block, nullptr, buf)) {
+      if (unaligned) memcpy(dst, buf, sizeof(sdio_bounce_buf));
+      return true;
+    }
     return false;
 
   #endif
@@ -451,6 +462,11 @@ bool SDIO_WriteBlock(uint32_t block, const uint8_t *src) {
 
   #else
 
+    // See SDIO_ReadBlock: the DMA source must be word-aligned
+    if (uintptr_t(src) & 3U) {
+      memcpy(sdio_bounce_buf, src, sizeof(sdio_bounce_buf));
+      src = sdio_bounce_buf;
+    }
     uint8_t retries = SDIO_READ_RETRIES;
     while (retries--) {
       if (SDIO_ReadWriteBlock_DMA(block, src, nullptr)) return true;
